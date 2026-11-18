@@ -30,9 +30,14 @@ PORT = int(os.environ.get("PORT", 8000))
 FICHIER_MEMOIRE = "memoire_jarvis.json"
 
 
+FAVORIS_PAR_DEFAUT = (
+    "ma playlist=https://music.apple.com/fr/playlist/bordel/pl.u-9N9L2ads1GLazx0"
+)
+
+
 def lire_favoris():
     favoris = {}
-    for morceau in os.environ.get("JARVIS_FAVORIS", "").split(";"):
+    for morceau in (os.environ.get("JARVIS_FAVORIS") or FAVORIS_PAR_DEFAUT).split(";"):
         nom, _, lien = morceau.partition("=")
         if nom.strip() and lien.strip().startswith("http"):
             favoris[nom.strip().lower()] = lien.strip()
