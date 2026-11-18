@@ -30,8 +30,10 @@ PORT = int(os.environ.get("PORT", 8000))
 FICHIER_MEMOIRE = "memoire_jarvis.json"
 
 
+# Un favori « shortcuts://run-shortcut?name=… » lance un raccourci de l'iPhone
 FAVORIS_PAR_DEFAUT = (
-    "ma playlist=https://music.apple.com/fr/playlist/bordel/pl.u-9N9L2ads1GLazx0"
+    "ma playlist bordel=shortcuts://run-shortcut?name=Bordel;"
+    "apple music bordel=https://music.apple.com/fr/playlist/bordel/pl.u-9N9L2ads1GLazx0"
 )
 
 
@@ -39,7 +41,7 @@ def lire_favoris():
     favoris = {}
     for morceau in (os.environ.get("JARVIS_FAVORIS") or FAVORIS_PAR_DEFAUT).split(";"):
         nom, _, lien = morceau.partition("=")
-        if nom.strip() and lien.strip().startswith("http"):
+        if nom.strip() and lien.strip().startswith(("http", "shortcuts://")):
             favoris[nom.strip().lower()] = lien.strip()
     return favoris
 
@@ -308,7 +310,7 @@ function parler(t){if(!voixOn||!tts||!t)return;speechSynthesis.cancel();const u=
 
 function ajouter(texte,qui,liens){
   const d=document.createElement('div');d.className='msg '+qui;d.textContent=texte;
-  (liens||[]).forEach(l=>{const a=document.createElement('a');a.href=l;a.target='_blank';a.rel='noopener';a.textContent='▶ Ouvrir';d.appendChild(document.createElement('br'));d.appendChild(a)});
+  (liens||[]).forEach(l=>{const a=document.createElement('a');a.href=l;const web=l.startsWith('http');if(web){a.target='_blank';a.rel='noopener'}a.textContent=web?'▶ Ouvrir':'▶ Lancer';d.appendChild(document.createElement('br'));d.appendChild(a)});
   fil.appendChild(d);fil.scrollTop=fil.scrollHeight;
 }
 
