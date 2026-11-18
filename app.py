@@ -5,6 +5,8 @@ Réglages à mettre dans Render, onglet « Environment » (jamais dans ce fichie
     GEMINI_API_KEY       ta clé Google AI Studio
     JARVIS_MOT_DE_PASSE  le mot de passe pour ouvrir l'appli
     JARVIS_MODELE_GEMINI (facultatif) par défaut gemini-3.5-flash-lite
+    JARVIS_FAVORIS       (facultatif) tes liens favoris, séparés par des points-virgules :
+                         ma playlist=https://music.apple.com/... ; sport=https://...
 """
 import os
 import json
@@ -26,6 +28,18 @@ MODELE = os.environ.get("JARVIS_MODELE_GEMINI", "gemini-3.5-flash-lite")
 FUSEAU = ZoneInfo(os.environ.get("JARVIS_FUSEAU", "Europe/Paris"))
 PORT = int(os.environ.get("PORT", 8000))
 FICHIER_MEMOIRE = "memoire_jarvis.json"
+
+
+def lire_favoris():
+    favoris = {}
+    for morceau in os.environ.get("JARVIS_FAVORIS", "").split(";"):
+        nom, _, lien = morceau.partition("=")
+        if nom.strip() and lien.strip().startswith("http"):
+            favoris[nom.strip().lower()] = lien.strip()
+    return favoris
+
+
+FAVORIS = lire_favoris()
 JOURS = ["lundi", "mardi", "mercredi", "jeudi", "vendredi", "samedi", "dimanche"]
 MOIS = ["janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août",
         "septembre", "octobre", "novembre", "décembre"]
@@ -62,7 +76,10 @@ def prompt_systeme():
         "car tes réponses peuvent être lues à voix haute : pas de listes, pas de markdown, pas d'émojis. "
         "Utilise tes outils quand c'est utile. Quand l'utilisateur te confie une info personnelle "
         "durable (prénom, préférences, proches…), mémorise-la avec l'outil memoriser.\n\n"
-        f"Ce que tu sais de l'utilisateur :\n{souvenirs}"
+        f"Ce que tu sais de l'utilisateur :\n{souvenirs}\n\n"
+        "Favoris de l'utilisateur (ouvre-les avec l'outil ouvrir_favori, jamais avec ouvrir_site) : "
+        + (", ".join(FAVORIS) or "aucun")
+        + ". Par exemple, « mets ma playlist » ou « lance ma musique » ouvre le favori qui correspond."
     )
 
 
@@ -75,14 +92,66 @@ OUTILS = [
      "description": "Ouvre une page web sur le téléphone (site, recherche Google, musique sur YouTube…).",
      "parameters": {"type": "object", "properties": {"url": {"type": "string", "description": "URL complète"}},
                     "required": ["url"]}},
+    {"name": "ouvrir_favori",
+     "description": "Ouvre un des liens favoris de l'utilisateur (sa playlist Apple Music, etc.).",
+     "parameters": {"type": "object", "properties": {"nom": {"type": "string", "description": "Nom du favori"}},
+                    "required": ["nom"]}},
     {"name": "memoriser", "description": "Mémorise durablement une information sur l'utilisateur.",
      "parameters": {"type": "object", "properties": {"info": {"type": "string"}}, "required": ["info"]}},
 ]
 
 
 def _get_json(url):
-    with urllib.request.urlopen(url, timeout=10) as r:
+    requete = urllib.request.Request(url, headers={"User-Agent": "Jarvis-perso/1.0"})
+    with urllib.request.urlopen(requete, timeout=10) as r:
         return json.loads(r.read().decode())
+
+
+def meteo_open_meteo(ville):
+    geo = _get_json("https://geocoding-api.open-meteo.com/v1/search?count=1&language=fr&name="
+                    + urllib.parse.quote(ville))
+    if not geo.get("results"):
+        return "Ville introuvable."
+    lieu = geo["results"][0]
+    m = _get_json(
+        "https://api.open-meteo.com/v1/forecast"
+        f"?latitude={lieu['latitude']}&longitude={lieu['longitude']}"
+        "&current=temperature_2m,wind_speed_10m"
+        "&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max"
+        "&timezone=auto&forecast_days=1")
+    c, d = m["current"], m["daily"]
+    return (f"{lieu['name']} : {c['temperature_2m']}°C maintenant, vent {c['wind_speed_10m']} km/h. "
+            f"Aujourd'hui entre {d['temperature_2m_min'][0]} et {d['temperature_2m_max'][0]}°C, "
+            f"{d['precipitation_probability_max'][0]}% de risque de pluie.")
+
+
+def meteo_wttr(ville):
+    """Source de secours : wttr.in (gratuite, sans clé)."""
+    m = _get_json(f"https://wttr.in/{urllib.parse.quote(ville)}?format=j1&lang=fr")
+    c, j = m["current_condition"][0], m["weather"][0]
+    ciel = (c.get("lang_fr") or c.get("weatherDesc") or [{"value": ""}])[0]["value"].strip()
+    pluie = max((int(h.get("chanceofrain", 0)) for h in j.get("hourly", [])), default=0)
+    return (f"{ville} : {c['temp_C']}°C maintenant, {ciel.lower()}, vent {c['windspeedKmph']} km/h. "
+            f"Aujourd'hui entre {j['mintempC']} et {j['maxtempC']}°C, {pluie}% de risque de pluie.")
+
+
+cache_meteo = {}  # évite de redemander la même ville pendant 20 minutes
+
+
+def meteo(ville):
+    cle = ville.strip().lower()
+    if cle in cache_meteo and time.time() - cache_meteo[cle][0] < 1200:
+        return cache_meteo[cle][1]
+    erreurs = []
+    for source in (meteo_open_meteo, meteo_wttr):
+        try:
+            resultat = source(ville)
+            cache_meteo[cle] = (time.time(), resultat)
+            return resultat
+        except Exception as e:
+            erreurs.append(f"{source.__name__} : {e}")
+            print("Météo indisponible ->", erreurs[-1], flush=True)
+    return "Les deux services météo sont indisponibles pour le moment (" + " ; ".join(erreurs) + ")."
 
 
 def executer_outil(nom, args, liens):
@@ -91,24 +160,22 @@ def executer_outil(nom, args, liens):
             m = datetime.datetime.now(FUSEAU)
             return f"{JOURS[m.weekday()]} {m.day} {MOIS[m.month - 1]} {m.year}, {m:%H:%M}"
         if nom == "meteo":
-            geo = _get_json("https://geocoding-api.open-meteo.com/v1/search?count=1&language=fr&name="
-                            + urllib.parse.quote(args["ville"]))
-            if not geo.get("results"):
-                return "Ville introuvable."
-            lieu = geo["results"][0]
-            m = _get_json(
-                "https://api.open-meteo.com/v1/forecast"
-                f"?latitude={lieu['latitude']}&longitude={lieu['longitude']}"
-                "&current=temperature_2m,wind_speed_10m"
-                "&daily=temperature_2m_max,temperature_2m_min,precipitation_probability_max"
-                "&timezone=auto&forecast_days=1")
-            c, d = m["current"], m["daily"]
-            return (f"{lieu['name']} : {c['temperature_2m']}°C maintenant, vent {c['wind_speed_10m']} km/h. "
-                    f"Aujourd'hui entre {d['temperature_2m_min'][0]} et {d['temperature_2m_max'][0]}°C, "
-                    f"{d['precipitation_probability_max'][0]}% de risque de pluie.")
+            return meteo(args["ville"])
         if nom == "ouvrir_site":
             liens.append(args["url"])
             return "Le lien est affiché sur le téléphone de l'utilisateur."
+        if nom == "ouvrir_favori":
+            if not FAVORIS:
+                return "Aucun favori n'est enregistré (variable JARVIS_FAVORIS vide dans Render)."
+            demande = args.get("nom", "").strip().lower()
+            trouve = FAVORIS.get(demande) or next(
+                (l for n, l in FAVORIS.items() if n in demande or demande in n), None)
+            if not trouve and len(FAVORIS) == 1:
+                trouve = next(iter(FAVORIS.values()))
+            if not trouve:
+                return "Favori introuvable. Favoris disponibles : " + ", ".join(FAVORIS)
+            liens.append(trouve)
+            return "Le favori est prêt : l'utilisateur doit appuyer sur « Ouvrir »."
         if nom == "memoriser":
             souvenirs = charger_memoire() + [args["info"]]
             with open(FICHIER_MEMOIRE, "w", encoding="utf-8") as f:
